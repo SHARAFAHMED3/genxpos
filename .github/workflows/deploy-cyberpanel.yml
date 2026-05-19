@@ -1,0 +1,123 @@
+# SSH deploy to CyberPanel (LiteSpeed + PHP 8.2).
+#
+# CyberPanel site (digierp.cloud → subdomain genxpos):
+#   DEPLOY_PATH: /home/digierp.cloud/public_html/genxpos
+#   Document root: /home/digierp.cloud/public_html/genxpos/public
+#   APP_URL:       https://genxpos.digierp.cloud
+#   SSH_USER:      digierp.cloud  (CyberPanel site system user)
+#
+# Required GitHub repository secrets:
+#   SSH_HOST, SSH_USER, SSH_PRIVATE_KEY
+#   DB_HOST, DB_DATABASE, DB_USERNAME, DB_PASSWORD
+#   APP_KEY, APP_URL
+#
+# Optional secrets (override defaults when set):
+#   DEPLOY_PATH (default: /home/digierp.cloud/public_html/genxpos)
+#   SSH_PORT (default 22)
+#   DB_PORT, APP_ENV, APP_DEBUG, APP_NAME, MAIL_* , ENVATO_PURCHASE_CODE, etc.
+
+name: Deploy to CyberPanel
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - production
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-cyberpanel-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    env:
+      SSH_HOST: ${{ secrets.SSH_HOST }}
+      SSH_USER: ${{ secrets.SSH_USER }}
+      SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
+      DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || '/home/digierp.cloud/public_html/genxpos' }}
+      DB_HOST: ${{ secrets.DB_HOST }}
+      DB_PORT: ${{ secrets.DB_PORT || '3306' }}
+      DB_DATABASE: ${{ secrets.DB_DATABASE }}
+      DB_USERNAME: ${{ secrets.DB_USERNAME }}
+      DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+      APP_KEY: ${{ secrets.APP_KEY }}
+      APP_URL: ${{ secrets.APP_URL }}
+      APP_ENV: ${{ secrets.APP_ENV || 'production' }}
+      APP_DEBUG: ${{ secrets.APP_DEBUG || 'false' }}
+      APP_NAME: ${{ secrets.APP_NAME }}
+      MAIL_HOST: ${{ secrets.MAIL_HOST }}
+      MAIL_PORT: ${{ secrets.MAIL_PORT }}
+      MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
+      MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
+      MAIL_FROM_ADDRESS: ${{ secrets.MAIL_FROM_ADDRESS }}
+      ENVATO_PURCHASE_CODE: ${{ secrets.ENVATO_PURCHASE_CODE }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate deploy secrets
+        run: |
+          missing=0
+          for name in SSH_HOST SSH_USER DB_HOST DB_DATABASE DB_USERNAME DB_PASSWORD APP_KEY APP_URL; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing secret: $name"
+              missing=1
+            fi
+          done
+          if [ -z "${{ secrets.SSH_PRIVATE_KEY }}" ]; then
+            echo "::error::Missing secret: SSH_PRIVATE_KEY"
+            missing=1
+          fi
+          exit "$missing"
+
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -p "$SSH_PORT" -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Ensure deploy directory exists
+        run: |
+          ssh -i ~/.ssh/deploy_key -p "$SSH_PORT" -o StrictHostKeyChecking=yes \
+            "${SSH_USER}@${SSH_HOST}" "mkdir -p '${DEPLOY_PATH}'"
+
+      - name: Rsync application to server
+        run: |
+          rsync -avz --delete \
+            -e "ssh -i ~/.ssh/deploy_key -p ${SSH_PORT} -o StrictHostKeyChecking=yes" \
+            --exclude '.git' \
+            --exclude '.env' \
+            --exclude '.env.*' \
+            --exclude 'node_modules' \
+            --exclude 'vendor' \
+            --exclude 'storage/logs' \
+            --exclude 'storage/framework/cache' \
+            --exclude 'storage/framework/sessions' \
+            --exclude 'storage/framework/views' \
+            --exclude 'uploads' \
+            ./ "${SSH_USER}@${SSH_HOST}:${DEPLOY_PATH}/"
+
+      - name: Generate .env and run deploy
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.SSH_PORT || 22 }}
+          envs: >-
+            DEPLOY_PATH,DB_HOST,DB_PORT,DB_DATABASE,DB_USERNAME,DB_PASSWORD,
+            APP_KEY,APP_URL,APP_ENV,APP_DEBUG,APP_NAME,
+            MAIL_HOST,MAIL_PORT,MAIL_USERNAME,MAIL_PASSWORD,MAIL_FROM_ADDRESS,
+            ENVATO_PURCHASE_CODE
+          script: |
+            set -euo pipefail
+            cd "${DEPLOY_PATH}"
+            chmod +x scripts/generate-env.sh scripts/deploy-remote.sh
+            bash scripts/generate-env.sh
+            bash scripts/deploy-remote.sh
